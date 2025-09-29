@@ -2,12 +2,12 @@
 import { spawn } from "child_process";
 import path from "node:path";
 
-/** Trả về path tới binary yt-dlp (ưu tiên ENV, sau đó ./bin/yt-dlp) */
+/** Path tới binary yt-dlp (ưu tiên ENV → ./bin/yt-dlp) */
 function ytdlpBin() {
   return process.env.YTDLP_BIN || path.join(process.cwd(), "bin", "yt-dlp");
 }
 
-/** Common args bạn đang dùng — giữ nguyên nếu trước đó có */
+/** Tham số dùng chung cho yt-dlp */
 const commonArgs = () => [
   "--no-color",
   "--newline",
@@ -16,7 +16,7 @@ const commonArgs = () => [
   "--concurrent-fragments", "4",
 ];
 
-/** Parse formats (lọc progressive mp4 nếu muốn) — giữ nguyên nếu bạn đã có */
+/** Convert NDJSON/JSON từ yt-dlp về cấu trúc gọn cho UI */
 export function parseYtdlpJsonLines(lines = []) {
   const info = { title: "", thumbnail: "", duration: 0, extractor: "", formats: [] };
 
@@ -24,34 +24,37 @@ export function parseYtdlpJsonLines(lines = []) {
     if (!ln) continue;
     try {
       const obj = JSON.parse(ln);
+
+      // metadata video
       if (obj._type === "video") {
-        info.title = obj.title || info.title;
-        info.thumbnail = obj.thumbnail || info.thumbnail;
-        info.duration = obj.duration || info.duration;
-        info.extractor = obj.extractor || info.extractor;
+        info.title     = obj.title     ?? info.title;
+        info.thumbnail = obj.thumbnail ?? info.thumbnail;
+        info.duration  = obj.duration  ?? info.duration;
+        info.extractor = obj.extractor ?? info.extractor;
       }
+
+      // định dạng
       if (obj.format_id) {
         const ext = (obj.ext || "").toLowerCase();
         const hasVideo = !!obj.vcodec && obj.vcodec !== "none";
         const hasAudio = !!obj.acodec && obj.acodec !== "none";
 
-        // chỉ giữ progressive MP4
+        // Giữ **progressive MP4** (tránh DASH gây dính logo/không tiếng trên vài nguồn)
         if (ext === "mp4" && hasVideo && hasAudio) {
-          const f = {
+          info.formats.push({
             id: obj.format_id,
             ext: obj.ext,
             resolution: obj.height ? `${obj.height}p` : "auto",
             filesize: obj.filesize || 0,
-          };
-          info.formats.push(f);
+          });
         }
       }
-    } catch {}
+    } catch { /* bỏ dòng lỗi parse */ }
   }
   return info;
 }
 
-/** Gọi yt-dlp để probe */
+/** Probe: gọi yt-dlp lấy metadata + danh sách format */
 export function probeWithYtdlp({ url }) {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -67,11 +70,11 @@ export function probeWithYtdlp({ url }) {
     child.on("error", (err) => reject(new Error(`yt-dlp spawn error: ${err.message}`)));
     child.on("close", () => {
       try {
-        // yt-dlp -J có thể trả 1 JSON object lớn, không phải NDJSON
-        const raw = Buffer.concat(chunks).toString("utf8").trim();
+        // -J thường trả **một** JSON object lớn
+        const raw  = Buffer.concat(chunks).toString("utf8").trim();
         const json = JSON.parse(raw);
 
-        // chuyển về cấu trúc info dùng chung
+        // ép về dạng NDJSON để tái dụng parser ở trên
         const lines = [];
         lines.push(JSON.stringify({
           _type: "video",
@@ -82,8 +85,7 @@ export function probeWithYtdlp({ url }) {
         }));
         (json.formats || []).forEach(f => lines.push(JSON.stringify(f)));
 
-        const info = parseYtdlpJsonLines(lines);
-        resolve(info);
+        resolve(parseYtdlpJsonLines(lines));
       } catch (e) {
         reject(new Error(`yt-dlp parse error: ${e.message}`));
       }
@@ -91,7 +93,7 @@ export function probeWithYtdlp({ url }) {
   });
 }
 
-/** Tải MP4: stream trực tiếp định dạng đã chọn */
+/** Stream MP4 trực tiếp ra response */
 export function pipeProcessToRes({ url, formatId, res }) {
   const args = [...commonArgs()];
   if (formatId) args.push("-f", formatId);
@@ -102,24 +104,16 @@ export function pipeProcessToRes({ url, formatId, res }) {
 
   child.stdout.pipe(res);
   child.stderr.on("data", d => console.error("[yt-dlp]", d.toString()));
-  child.on("error", err => {
-    res.destroy(err);
-  });
+  child.on("error", err => res.destroy(err));
   child.on("close", (code) => {
-    if (code !== 0) {
-      res.destroy(new Error(`yt-dlp exited with code ${code}`));
-    } else {
-      res.end();
-    }
+    if (code !== 0) res.destroy(new Error(`yt-dlp exited with code ${code}`));
+    else res.end();
   });
 
   return child;
 }
 
-/** (Tuỳ chọn) Tải MP3: cần ffmpeg — nếu chưa cài ffmpeg thì tạm chưa dùng hàm này */
-export function buildAudioPipeline({ url }) {
-  // Nếu chưa cài ffmpeg, tạm throw để nút MP3 không được dùng
-  throw new Error("FFmpeg is not bundled yet on Render. Please add ffmpeg or disable MP3.");
+/** (Tạm tắt) Tải MP3: cần ffmpeg — không bundle trên Render Free */
+export function buildAudioPipeline() {
+  throw new Error("FFmpeg is not bundled on Render free plan. Disable MP3 or add ffmpeg layer.");
 }
-export { downloadAudio as downloadAudioMp3 };
-

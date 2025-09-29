@@ -3,6 +3,7 @@ import express from "express";
 import morgan from "morgan";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { downloadAudioMp3 } from "./ytdlp.js";
 
 import {
   probe,                // lấy metadata + danh sách format đã lọc sẵn
