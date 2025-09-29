@@ -4,7 +4,7 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "dev": "node src/server.js",
+    "postinstall": "mkdir -p bin && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o bin/yt-dlp && chmod +x bin/yt-dlp && curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o bin/ffmpeg.tar.xz && tar -xf bin/ffmpeg.tar.xz -C bin && mv bin/ffmpeg-*-amd64-static/ffmpeg bin/ffmpeg && chmod +x bin/ffmpeg",
     "start": "node src/server.js"
   },
   "dependencies": {
