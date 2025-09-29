@@ -21,7 +21,7 @@ const TIKTOK_EXTRACTOR_PROFILES = [
   "--extractor-args=tiktok:app_info=ios,hd=1",
 ];
 
-/** Biến thể domain Facebook để bắt comment video công khai */
+/** Biến thể domain Facebook để tăng tỉ lệ bắt video công khai */
 function fbVariants(raw) {
   try {
     const u = new URL(raw);
@@ -35,7 +35,7 @@ function fbVariants(raw) {
   } catch { return [raw]; }
 }
 
-/** Gọi yt-dlp để lấy JSON metadata */
+/** Gọi yt-dlp để lấy JSON metadata (kèm extra args) */
 function runProbe(url, extraArgs = []) {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -49,25 +49,22 @@ function runProbe(url, extraArgs = []) {
     child.on("error", e => reject(new Error(`yt-dlp spawn error: ${e.message}`)));
     child.on("close", code => {
       if (code !== 0) return reject(new Error(err || `yt-dlp exited ${code}`));
-      try {
-        resolve(JSON.parse(out));
-      } catch (e) {
-        reject(e);
-      }
+      try { resolve(JSON.parse(out)); }
+      catch (e) { reject(e); }
     });
   });
 }
 
-/** Lọc các format có watermark / HLS-DASH / thiếu audio hoặc video */
+/** Lọc format: bỏ watermark / HLS-DASH / thiếu audio hoặc video */
 function filterFormats(raw = []) {
   return raw.filter(f => {
     const note = String(f.format_note || "").toLowerCase();
     const prot = String(f.protocol || "").toLowerCase();
-    if (note.includes("watermark")) return false;                 // loại watermark
-    if (prot.includes("m3u8") || prot.includes("http_dash")) return false; // tránh HLS/DASH
-    if (!f.vcodec || f.vcodec === "none") return false;           // cần có video
-    if (!f.acodec || f.acodec === "none") return false;           // cần có audio
-    return true;                                                  // giữ progressive mp4/webm
+    if (note.includes("watermark")) return false;
+    if (prot.includes("m3u8") || prot.includes("http_dash")) return false;
+    if (!f.vcodec || f.vcodec === "none") return false;
+    if (!f.acodec || f.acodec === "none") return false;
+    return true; // progressive mp4/webm
   });
 }
 
@@ -125,6 +122,5 @@ export function downloadAudioMp3({ url }) {
     ["-i", "pipe:0", "-vn", "-acodec", "libmp3lame", "-b:a", "320k", "-f", "mp3", "pipe:1"],
     { windowsHide: true }
   );
-  ytdlp.stdout.pipe(ffmpeg.stdin);
   return { ytdlp, ffmpeg };
 }
