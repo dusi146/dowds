@@ -121,3 +121,5 @@ export function buildAudioPipeline({ url }) {
   // Nếu chưa cài ffmpeg, tạm throw để nút MP3 không được dùng
   throw new Error("FFmpeg is not bundled yet on Render. Please add ffmpeg or disable MP3.");
 }
+export { downloadAudio as downloadAudioMp3 };
+
