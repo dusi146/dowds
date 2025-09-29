@@ -1,126 +1,123 @@
+// src/ytdlp.js
 import { spawn } from "child_process";
+import path from "node:path";
 
-/** Chọn binary yt-dlp từ PATH */
+/** Trả về path tới binary yt-dlp (ưu tiên ENV, sau đó ./bin/yt-dlp) */
 function ytdlpBin() {
-  return process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
+  return process.env.YTDLP_BIN || path.join(process.cwd(), "bin", "yt-dlp");
 }
 
-/** Tham số chung – ưu tiên IPv4, UA/Referer cho FB/IG, giảm log ồn */
-function commonArgs() {
-  return [
-    "--no-warnings",
-    "--force-ipv4",
-    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-    "--add-header", "Referer:https://www.facebook.com/",
-  ];
-}
-
-/** Các cấu hình extractor-args cho TikTok (thử lần lượt để tăng tỉ lệ no-WM) */
-const TIKTOK_EXTRACTOR_PROFILES = [
-  "--extractor-args=tiktok:app_info=android,hd=1",
-  "--extractor-args=tiktok:app_info=ios,hd=1",
+/** Common args bạn đang dùng — giữ nguyên nếu trước đó có */
+const commonArgs = () => [
+  "--no-color",
+  "--newline",
+  "--restrict-filenames",
+  "--no-warnings",
+  "--concurrent-fragments", "4",
 ];
 
-/** Biến thể domain Facebook để tăng tỉ lệ bắt video công khai */
-function fbVariants(raw) {
-  try {
-    const u = new URL(raw);
-    if (!/facebook\.com/i.test(u.hostname)) return [raw];
-    const path = u.pathname + (u.search || "") + (u.hash || "");
-    return [
-      `https://www.facebook.com${path}`,
-      `https://m.facebook.com${path}`,
-      `https://mbasic.facebook.com${path}`,
-    ];
-  } catch { return [raw]; }
+/** Parse formats (lọc progressive mp4 nếu muốn) — giữ nguyên nếu bạn đã có */
+export function parseYtdlpJsonLines(lines = []) {
+  const info = { title: "", thumbnail: "", duration: 0, extractor: "", formats: [] };
+
+  for (const ln of lines) {
+    if (!ln) continue;
+    try {
+      const obj = JSON.parse(ln);
+      if (obj._type === "video") {
+        info.title = obj.title || info.title;
+        info.thumbnail = obj.thumbnail || info.thumbnail;
+        info.duration = obj.duration || info.duration;
+        info.extractor = obj.extractor || info.extractor;
+      }
+      if (obj.format_id) {
+        const ext = (obj.ext || "").toLowerCase();
+        const hasVideo = !!obj.vcodec && obj.vcodec !== "none";
+        const hasAudio = !!obj.acodec && obj.acodec !== "none";
+
+        // chỉ giữ progressive MP4
+        if (ext === "mp4" && hasVideo && hasAudio) {
+          const f = {
+            id: obj.format_id,
+            ext: obj.ext,
+            resolution: obj.height ? `${obj.height}p` : "auto",
+            filesize: obj.filesize || 0,
+          };
+          info.formats.push(f);
+        }
+      }
+    } catch {}
+  }
+  return info;
 }
 
-/** Gọi yt-dlp để lấy JSON metadata (kèm extra args) */
-function runProbe(url, extraArgs = []) {
+/** Gọi yt-dlp để probe */
+export function probeWithYtdlp({ url }) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       ytdlpBin(),
-      [...commonArgs(), ...extraArgs, "-J", url],
+      [...commonArgs(), "-J", "--no-simulate", url],
       { windowsHide: true }
     );
-    let out = "", err = "";
-    child.stdout.on("data", d => (out += d));
-    child.stderr.on("data", d => (err += String(d)));
-    child.on("error", e => reject(new Error(`yt-dlp spawn error: ${e.message}`)));
-    child.on("close", code => {
-      if (code !== 0) return reject(new Error(err || `yt-dlp exited ${code}`));
-      try { resolve(JSON.parse(out)); }
-      catch (e) { reject(e); }
+
+    const chunks = [];
+    child.stdout.on("data", d => chunks.push(d));
+    child.stderr.on("data", d => console.error("[yt-dlp]", d.toString()));
+
+    child.on("error", (err) => reject(new Error(`yt-dlp spawn error: ${err.message}`)));
+    child.on("close", () => {
+      try {
+        // yt-dlp -J có thể trả 1 JSON object lớn, không phải NDJSON
+        const raw = Buffer.concat(chunks).toString("utf8").trim();
+        const json = JSON.parse(raw);
+
+        // chuyển về cấu trúc info dùng chung
+        const lines = [];
+        lines.push(JSON.stringify({
+          _type: "video",
+          title: json.title,
+          thumbnail: json.thumbnail,
+          duration: json.duration,
+          extractor: json.extractor,
+        }));
+        (json.formats || []).forEach(f => lines.push(JSON.stringify(f)));
+
+        const info = parseYtdlpJsonLines(lines);
+        resolve(info);
+      } catch (e) {
+        reject(new Error(`yt-dlp parse error: ${e.message}`));
+      }
     });
   });
 }
 
-/** Lọc format: bỏ watermark / HLS-DASH / thiếu audio hoặc video */
-function filterFormats(raw = []) {
-  return raw.filter(f => {
-    const note = String(f.format_note || "").toLowerCase();
-    const prot = String(f.protocol || "").toLowerCase();
-    if (note.includes("watermark")) return false;
-    if (prot.includes("m3u8") || prot.includes("http_dash")) return false;
-    if (!f.vcodec || f.vcodec === "none") return false;
-    if (!f.acodec || f.acodec === "none") return false;
-    return true; // progressive mp4/webm
+/** Tải MP4: stream trực tiếp định dạng đã chọn */
+export function pipeProcessToRes({ url, formatId, res }) {
+  const args = [...commonArgs()];
+  if (formatId) args.push("-f", formatId);
+  args.push("-o", "-"); // stdout
+  args.push(url);
+
+  const child = spawn(ytdlpBin(), args, { windowsHide: true });
+
+  child.stdout.pipe(res);
+  child.stderr.on("data", d => console.error("[yt-dlp]", d.toString()));
+  child.on("error", err => {
+    res.destroy(err);
   });
-}
-
-/** PROBE có retry cho TikTok (profiles) & Facebook (domain variants) */
-export async function probe(url) {
-  const isTikTok = /tiktok\.com/i.test(url);
-  const isFacebook = /facebook\.com/i.test(url);
-
-  const tiktokProfiles = isTikTok ? TIKTOK_EXTRACTOR_PROFILES : [""];
-  const fbUrls = isFacebook ? fbVariants(url) : [url];
-
-  let lastErr;
-
-  for (const candidateUrl of fbUrls) {
-    const profiles = isTikTok ? tiktokProfiles : [""];
-    for (const profile of profiles) {
-      try {
-        const meta = await runProbe(candidateUrl, profile ? [profile] : []);
-        const formats = filterFormats(meta.formats || []);
-        if (formats.length > 0 || (!isTikTok && !isFacebook)) {
-          return { meta, formats };
-        }
-        lastErr = new Error("Only adaptive/watermarked formats; retrying profile/domain…");
-      } catch (e) {
-        lastErr = e;
-      }
+  child.on("close", (code) => {
+    if (code !== 0) {
+      res.destroy(new Error(`yt-dlp exited with code ${code}`));
+    } else {
+      res.end();
     }
-  }
-  throw lastErr || new Error("probe failed");
+  });
+
+  return child;
 }
 
-/** Stream video: ưu tiên progressive mp4/webm; tránh HLS/DASH */
-export function downloadVideo({ url, format }) {
-  const fallback =
-    "best[ext=mp4][vcodec!=none][acodec!=none][protocol!=m3u8][protocol!=http_dash_segment_base]/" +
-    "best[ext=webm][vcodec!=none][acodec!=none]/best";
-  const args = [
-    ...commonArgs(),
-    ...( /tiktok\.com/i.test(url) ? [TIKTOK_EXTRACTOR_PROFILES[0]] : [] ),
-    "-f", format || fallback,
-    "-o", "-", url,
-  ];
-  return spawn(ytdlpBin(), args, { windowsHide: true });
-}
-
-/** Stream MP3: bestaudio -> ffmpeg (320k) */
-export function downloadAudioMp3({ url }) {
-  const ytdlp = spawn(
-    ytdlpBin(),
-    [...commonArgs(), "-f", "bestaudio", "-o", "-", url],
-    { windowsHide: true }
-  );
-  const ffmpeg = spawn(
-    "ffmpeg",
-    ["-i", "pipe:0", "-vn", "-acodec", "libmp3lame", "-b:a", "320k", "-f", "mp3", "pipe:1"],
-    { windowsHide: true }
-  );
-  return { ytdlp, ffmpeg };
+/** (Tuỳ chọn) Tải MP3: cần ffmpeg — nếu chưa cài ffmpeg thì tạm chưa dùng hàm này */
+export function buildAudioPipeline({ url }) {
+  // Nếu chưa cài ffmpeg, tạm throw để nút MP3 không được dùng
+  throw new Error("FFmpeg is not bundled yet on Render. Please add ffmpeg or disable MP3.");
 }
